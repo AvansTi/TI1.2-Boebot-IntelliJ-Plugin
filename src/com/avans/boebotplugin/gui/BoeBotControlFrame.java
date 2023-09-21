@@ -3,18 +3,20 @@ package com.avans.boebotplugin.gui;
 import com.avans.boebotplugin.services.Settings;
 import com.intellij.lang.jvm.JvmModifier;
 import com.intellij.openapi.application.ApplicationManager;
-import com.intellij.openapi.compiler.ex.CompilerPathsEx;
+import com.intellij.openapi.compiler.CompilerPaths;
 import com.intellij.openapi.components.ServiceManager;
+import com.intellij.openapi.module.Module;
 import com.intellij.openapi.module.ModuleManager;
 import com.intellij.openapi.project.DumbService;
 import com.intellij.openapi.project.Project;
+import com.intellij.openapi.roots.CompilerModuleExtension;
 import com.intellij.openapi.ui.Messages;
+import com.intellij.openapi.vfs.VirtualFile;
 import com.intellij.psi.*;
+import com.intellij.psi.impl.source.PsiJavaFileImpl;
 import com.intellij.task.ProjectTaskManager;
-import com.intellij.task.ProjectTaskNotification;
-import com.intellij.task.ProjectTaskResult;
 import com.jcraft.jsch.*;
-import org.jetbrains.annotations.NotNull;
+
 import javax.swing.*;
 import javax.swing.event.PopupMenuEvent;
 import javax.swing.event.PopupMenuListener;
@@ -34,6 +36,7 @@ import java.util.ArrayList;
 import java.util.Calendar;
 import java.util.Date;
 import java.util.Properties;
+import java.util.function.Consumer;
 
 public class BoeBotControlFrame extends JPanel implements ActionListener {
 
@@ -65,22 +68,8 @@ public class BoeBotControlFrame extends JPanel implements ActionListener {
         if (this.project == null)
             throw new InvalidParameterException("Project cannot be null");
 
-        String[] outputPaths = CompilerPathsEx.getOutputPaths(ModuleManager.getInstance(this.project).getModules());
-        if (outputPaths.length == 0) {
 
-            ApplicationManager.getApplication().invokeLater(() -> Messages.showDialog(
-                    project,
-                    "Please set an out path in your project preferences",
-                    "Error opening panel",
-                    "Please set an outpath in the project preferences and restart IntelliJ",
-                    new String[]{Messages.OK_BUTTON},
-                    0,
-                    0,
-                    Messages.getErrorIcon()
-            ));
-            return;
-        }
-        outputRoot = outputPaths[0];
+
 
         this.projectName = projectName.replace(' ', '_');
         this.packageDirectory = packageDirectory;
@@ -157,38 +146,44 @@ public class BoeBotControlFrame extends JPanel implements ActionListener {
         topPanel.add(uploadButton);
         uploadButton.addActionListener(arg0 -> {
             log.setText("");
-            ProjectTaskManager.getInstance(project).rebuild(ModuleManager.getInstance(project).getModules(), new ProjectTaskNotification() {
+            ProjectTaskManager.getInstance(project).rebuild(ModuleManager.getInstance(project).getModules()[0]).onSuccess(new Consumer<ProjectTaskManager.Result>() {
                 @Override
-                public void finished(@NotNull ProjectTaskResult projectTaskResult) {
-                    log.append("Compilation result: " +
-                            projectTaskResult.getErrors() + " errors, " +
-                            projectTaskResult.getWarnings() + " warnings\n");
-                    if (projectTaskResult.isAborted())
-                        log.append("Compilation aborted!!!! Please check your code\n");
-                    else
-                        (new Thread() {
-                            public void run() {
-                                if (!BoeBotControlFrame.this.isVisible())
-                                    return;
+                public void accept(ProjectTaskManager.Result result) {
+                    (new Thread() {
+                        public void run() {
+                            if (!BoeBotControlFrame.this.isVisible())
+                                return;
 
-                                closeRunningApplication();
-                                delay(100);
+                            closeRunningApplication();
+                            delay(100);
 
-                                if (session.isConnected()) {
-                                    DateFormat df = new SimpleDateFormat("yyyy-MM-dd_hh.mm.ss");
-                                    Date now = Calendar.getInstance().getTime();
-                                    String version = df.format(now);
+                            if (session.isConnected()) {
+                                DateFormat df = new SimpleDateFormat("yyyy-MM-dd_hh.mm.ss");
+                                Date now = Calendar.getInstance().getTime();
+                                String version = df.format(now);
 
-                                    versions.addItem(version);
-                                    versions.setSelectedItem(version);
+                                versions.addItem(version);
+                                versions.setSelectedItem(version);
 
-                                    uploadFiles();
-                                    runCode();
-                                }
+                                uploadFiles();
+                                runCode();
                             }
-                        }).start();
+                        }
+                    }).start();
                 }
             });
+//            , new ProjectTaskNotification() {
+//                @Override
+//                public void finished(@NotNull ProjectTaskResult projectTaskResult) {
+//                    log.append("Compilation result: " +
+//                            projectTaskResult.getErrors() + " errors, " +
+//                            projectTaskResult.getWarnings() + " warnings\n");
+//                    if (projectTaskResult.isAborted())
+//                        log.append("Compilation aborted!!!! Please check your code\n");
+//                    else
+//
+//                }
+//            });
         });
 
         topPanel.add(runButton);
@@ -267,25 +262,29 @@ public class BoeBotControlFrame extends JPanel implements ActionListener {
 
         System.out.println(dir.getName());
         for (PsiFile file : dir.getFiles()) {
-            if (file instanceof PsiJavaFile) {
-                PsiJavaFile javaFile = (PsiJavaFile) file;
+            try {
+                if (file instanceof PsiJavaFile) {
+                    PsiJavaFile javaFile = (PsiJavaFile) file;
 
-                for (PsiClass clazz : javaFile.getClasses()) {
-                    for (PsiMethod method : clazz.getAllMethods()) {
-                        if (method.hasModifier(JvmModifier.STATIC) && method.getName().equals("main") && method.hasParameters()) {
-                            String name = clazz.getQualifiedName();
-                            boolean found = false;
-                            for (int i = 0; i < this.mainClass.getItemCount(); i++)
-                                if (this.mainClass.getItemAt(i).equals(name))
-                                    found = true;
+                    for (PsiClass clazz : javaFile.getClasses()) {
+                        for (PsiMethod method : clazz.getAllMethods()) {
+                            if (method.hasModifier(JvmModifier.STATIC) && method.getName().equals("main") && method.hasParameters()) {
+                                String name = clazz.getQualifiedName();
+                                boolean found = false;
+                                for (int i = 0; i < this.mainClass.getItemCount(); i++)
+                                    if (this.mainClass.getItemAt(i).equals(name))
+                                        found = true;
 
-                            if (!found)
-                                this.mainClass.addItem(clazz.getQualifiedName());
+                                if (!found)
+                                    this.mainClass.addItem(clazz.getQualifiedName());
+                            }
                         }
                     }
                 }
+            }catch(java.lang.NoClassDefFoundError e)
+            {
+                e.printStackTrace();
             }
-
         }
     }
 
@@ -411,6 +410,32 @@ public class BoeBotControlFrame extends JPanel implements ActionListener {
         log.append("Uploading " + files.size() + " files....");
         mkdir("/home/pi/upload/" + projectName, session);
         mkdir("/home/pi/upload/" + projectName + "/" + version, session);
+
+        ArrayList<String> outputPaths = new ArrayList<String>();
+        for(int i = 0; i < ModuleManager.getInstance(this.project).getModules().length; i++) {
+            Module m = ModuleManager.getInstance(this.project).getModules()[i];
+            CompilerModuleExtension instance = CompilerModuleExtension.getInstance(m);
+            VirtualFile compilerOutputPath = instance.getCompilerOutputPath();
+            if(compilerOutputPath != null)
+                outputPaths.add(compilerOutputPath.getPath());
+        }
+
+        //String[] outputPaths = CompilerPaths.getOutputPaths(ModuleManager.getInstance(this.project).getModules());
+        if (outputPaths.size() == 0) {
+
+            ApplicationManager.getApplication().invokeLater(() -> Messages.showDialog(
+                    project,
+                    "Please set an out path in your project preferences",
+                    "Error opening panel",
+                    "Please set an outpath in the project preferences and restart IntelliJ",
+                    new String[]{Messages.OK_BUTTON},
+                    0,
+                    0,
+                    Messages.getErrorIcon()
+            ));
+            return;
+        }
+        outputRoot = outputPaths.get(0);
 
         String sourcePath = packageDirectory.replace('\\', '/') + "/src";
         String outputPath = outputRoot.replace('\\', '/');
